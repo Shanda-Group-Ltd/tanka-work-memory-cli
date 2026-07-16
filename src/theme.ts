@@ -28,5 +28,6 @@ export function agentColor(agent: string): string {
   if (agent === 'claude-code') return 'magenta';
   if (agent === 'codex') return 'green';
   if (agent === 'cowork') return 'blue';
+  if (agent === 'claude-science') return 'cyan';
   return 'gray';
 }

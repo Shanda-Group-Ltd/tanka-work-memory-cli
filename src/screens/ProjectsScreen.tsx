@@ -35,17 +35,22 @@ import {
   type TankaEnv,
 } from '../config/config';
 import {
+  countScienceSessions,
   foldPath,
   isIgnoredCwd,
+  isScienceCwd,
   owningWorktree,
   scanSessionCwds,
+  scienceExportCwds,
+  syntheticCwdFor,
 } from '../discovery/sessions';
-import { clip } from '../format';
+import { clip, padEndWidth } from '../format';
 import { useAsync } from '../hooks/useAsync';
 import { useConfig } from '../hooks/useConfig';
 import { useScreenInput } from '../hooks/useScreenInput';
 import { useTerminalSize } from '../hooks/useTerminalSize';
 import { MigrateModal } from '../modals/MigrateModal';
+import { refreshScienceExportInteractive } from '../sync';
 import { theme } from '../theme';
 
 // ─── sub-screen states ──────────────────────────────────────
@@ -141,7 +146,28 @@ function scanAvailableCwds(config: Config, env: TankaEnv): ScannedCwdItem[] {
       usedByProjectId: usedCwds.get(key),
     });
   }
-  return items.sort((a, b) => b.sessionCount - a.sessionCount);
+  // Exported claude-science projects are pickable cwds too (each project ≡ one
+  // cwd). They carry no path — name comes from the exported project.json and the
+  // count from the exported session tree, both via the science-aware helpers.
+  for (const cwd of scienceExportCwds()) {
+    const key = foldPath(cwd);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push({
+      cwd,
+      root: cwd,
+      name: syntheticCwdFor(cwd).name,
+      sessionCount: countScienceSessions(cwd),
+      usedByProjectId: usedCwds.get(key),
+    });
+  }
+  // Science projects float to the top; within each group, most sessions first.
+  return items.sort((a, b) => {
+    const as = isScienceCwd(a.cwd);
+    const bs = isScienceCwd(b.cwd);
+    if (as !== bs) return as ? -1 : 1;
+    return b.sessionCount - a.sessionCount;
+  });
 }
 
 function generateCwdId(name: string, existing: Set<string>): string {
@@ -233,10 +259,15 @@ export function ProjectsScreen({
   });
   const [scanNonce, setScanNonce] = useState(0);
 
-  const cwdScan = useAsync<ScannedCwdItem[]>(
-    () => Promise.resolve().then(() => scanAvailableCwds(config, tankaEnv)),
-    [scanNonce, config.cwds, config.projects, tankaEnv],
-  );
+  const cwdScan = useAsync<ScannedCwdItem[]>(async () => {
+    // Refresh the science export first (best-effort, lock-guarded, async) so
+    // newly created science projects appear as pickable cwds. Uses the
+    // configured science dir, defaulting when unset (Tanka step sets it later).
+    // An unchanged pass is cheap (aggregate queries only), so re-running on
+    // config edits is fine.
+    await refreshScienceExportInteractive(config.scienceDir);
+    return scanAvailableCwds(config, tankaEnv);
+  }, [scanNonce, config.cwds, config.projects, tankaEnv]);
   const cwdItems = cwdScan.data ?? [];
 
   const projects = projectsForEnv(config, tankaEnv);
@@ -801,7 +832,7 @@ export function ProjectsScreen({
                       <Text
                         color={checked ? theme.ok : theme.dim}
                       >{`[${checked ? '✓' : ' '}] `}</Text>
-                      {clip(c.name, 24).padEnd(24)}
+                      {padEndWidth(clip(c.name, 24), 24)}
                       <Text
                         color={theme.dim}
                       >{` ${String(c.sessionCount).padStart(4)} sess  ${clip(c.cwd, Math.max(8, columns - 50))}`}</Text>
@@ -923,7 +954,7 @@ export function ProjectsScreen({
                     wrap="truncate"
                   >
                     {active ? '❯ ' : '  '}
-                    {clip(p.name, 24).padEnd(24)}
+                    {padEndWidth(clip(p.name, 24), 24)}
                     <Text
                       color={theme.dim}
                     >{`  ${p.remoteProjectId}  · ${p.origin}  · ${p.cwdIds.length} cwd(s)`}</Text>

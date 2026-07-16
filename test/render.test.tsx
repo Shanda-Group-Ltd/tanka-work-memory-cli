@@ -87,6 +87,9 @@ test('TankaConfigScreen mounts and renders the form fields', async () => {
   assert.match(frame, /Tanka settings/);
   assert.match(frame, /token/);
   assert.match(frame, /target/);
+  // claude-science data dir field with its default value
+  assert.match(frame, /claude science/);
+  assert.match(frame, /~\/\.claude-science/);
   unmount();
 });
 

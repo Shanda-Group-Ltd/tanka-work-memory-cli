@@ -41,7 +41,7 @@ export interface CreateProjectResponse {
 
 export interface SyncSessionItem {
   id: string;
-  agent: 'claude-code' | 'codex';
+  agent: 'claude-code' | 'codex' | 'claude-science';
   path: string;
   cwd: string;
   mtimeMs: number;

@@ -68,9 +68,57 @@ export function shortId(id: string): string {
   return id.slice(0, 8);
 }
 
-/** Clip a string to a column width, adding an ellipsis. */
+/**
+ * Terminal columns a single code point occupies: 2 for East-Asian wide /
+ * fullwidth characters (CJK, Kana, Hangul, fullwidth forms) and most emoji, 1
+ * otherwise. An approximation of Unicode East_Asian_Width good enough for
+ * aligning list columns — `padEnd`/`.length` count these as 1 and misalign
+ * anything after a CJK name.
+ */
+function codePointWidth(cp: number): number {
+  if (
+    (cp >= 0x1100 && cp <= 0x115f) || // Hangul Jamo
+    (cp >= 0x2e80 && cp <= 0x303e) || // CJK radicals · Kangxi · CJK symbols
+    (cp >= 0x3041 && cp <= 0x33ff) || // Kana · CJK compat
+    (cp >= 0x3400 && cp <= 0x4dbf) || // CJK Ext A
+    (cp >= 0x4e00 && cp <= 0x9fff) || // CJK Unified Ideographs
+    (cp >= 0xa000 && cp <= 0xa4cf) || // Yi
+    (cp >= 0xac00 && cp <= 0xd7a3) || // Hangul Syllables
+    (cp >= 0xf900 && cp <= 0xfaff) || // CJK Compat Ideographs
+    (cp >= 0xfe30 && cp <= 0xfe4f) || // CJK Compat Forms
+    (cp >= 0xff00 && cp <= 0xff60) || // Fullwidth Forms
+    (cp >= 0xffe0 && cp <= 0xffe6) || // Fullwidth signs
+    (cp >= 0x1f300 && cp <= 0x1faff) || // emoji / pictographs
+    (cp >= 0x20000 && cp <= 0x3fffd) // CJK Ext B and beyond
+  )
+    return 2;
+  return 1;
+}
+
+/** Total terminal columns a string occupies (CJK-aware; see codePointWidth). */
+export function displayWidth(s: string): number {
+  let w = 0;
+  for (const ch of s) w += codePointWidth(ch.codePointAt(0) ?? 0);
+  return w;
+}
+
+/** Right-pad a string to a display-column width (CJK-aware counterpart of padEnd). */
+export function padEndWidth(s: string, width: number): string {
+  const w = displayWidth(s);
+  return w >= width ? s : s + ' '.repeat(width - w);
+}
+
+/** Clip a string to a column width (CJK-aware), adding an ellipsis. */
 export function clip(s: string, width: number): string {
   const flat = s.replace(/\s+/g, ' ');
-  if (flat.length <= width) return flat;
-  return `${flat.slice(0, Math.max(0, width - 1))}…`;
+  if (displayWidth(flat) <= width) return flat;
+  let out = '';
+  let w = 0;
+  for (const ch of flat) {
+    const cw = codePointWidth(ch.codePointAt(0) ?? 0);
+    if (w + cw > Math.max(0, width - 1)) break; // reserve 1 col for the ellipsis
+    out += ch;
+    w += cw;
+  }
+  return `${out}…`;
 }

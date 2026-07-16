@@ -1,7 +1,14 @@
 import { test } from 'bun:test';
 import assert from 'node:assert/strict';
 import { computeWindow, moveIndex } from '../src/components/windowing';
-import { clip, fmtBytes, fmtRelTime, shortId } from '../src/format';
+import {
+  clip,
+  displayWidth,
+  fmtBytes,
+  fmtRelTime,
+  padEndWidth,
+  shortId,
+} from '../src/format';
 import { wrapText } from '../src/text';
 
 test('fmtBytes scales units', () => {
@@ -30,6 +37,26 @@ test('wrapText breaks long lines and keeps newlines', () => {
   const lines = wrapText('one two three four five', 9);
   assert.ok(lines.every((l) => l.length <= 9));
   assert.equal(wrapText('a\nb', 20).length, 2);
+});
+
+test('displayWidth counts CJK as 2 columns', () => {
+  assert.equal(displayWidth('abc'), 3);
+  assert.equal(displayWidth('中国社会研究'), 12); // 6 CJK × 2
+  assert.equal(displayWidth('Aあ'), 3); // 1 + 2 (Hiragana)
+});
+
+test('padEndWidth pads by display columns (CJK-aware)', () => {
+  // both cells occupy the same 24 columns despite different char counts
+  assert.equal(displayWidth(padEndWidth('Example project', 24)), 24);
+  assert.equal(displayWidth(padEndWidth('中国社会研究', 24)), 24);
+  // already-wide string is returned untouched
+  assert.equal(padEndWidth('中国社会研究', 4), '中国社会研究');
+});
+
+test('clip clips by display width and keeps the ellipsis', () => {
+  assert.equal(clip('中国社会研究abc', 6), '中国…'); // 4 cols + ellipsis ≤ 6
+  assert.equal(clip('short', 24), 'short'); // fits → unchanged
+  assert.equal(displayWidth(clip('中国社会研究研究研究', 8)) <= 8, true);
 });
 
 test('computeWindow keeps the cursor on screen', () => {

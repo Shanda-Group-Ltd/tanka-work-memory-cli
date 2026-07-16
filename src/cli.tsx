@@ -173,6 +173,7 @@ if (cmd === 'projects') {
     const mode = cfg.mode ?? 'select';
     const { allModeItems, selectModeItems, sessionCountsForItems } =
       await import('./project-items');
+    const { clip, padEndWidth } = await import('./format');
 
     if (mode === 'all') {
       const { discoverAllSessions } = await import('./discovery/sessions');
@@ -181,7 +182,7 @@ if (cmd === 'projects') {
       console.log(`${'NAME'.padEnd(26)}${'PROJECT ID'.padEnd(16)}SESSIONS`);
       for (const it of items) {
         console.log(
-          `${it.name.padEnd(26)}${(it.remoteProjectId ?? '(not created)').padEnd(16)}${it.sessions ?? 0}`,
+          `${padEndWidth(clip(it.name, 25), 26)}${(it.remoteProjectId ?? '(not created)').padEnd(16)}${it.sessions ?? 0}`,
         );
         for (const cwd of it.cwdPaths) console.log(`    cwd: ${cwd}`);
       }
@@ -195,7 +196,7 @@ if (cmd === 'projects') {
       );
       items.forEach((it, i) => {
         console.log(
-          `${it.name.padEnd(26)}${it.ns.padEnd(16)}${(it.origin ?? '—').padEnd(9)}${counts[i] ?? 0}`,
+          `${padEndWidth(clip(it.name, 25), 26)}${it.ns.padEnd(16)}${(it.origin ?? '—').padEnd(9)}${counts[i] ?? 0}`,
         );
         for (const cwd of it.cwdPaths) console.log(`    cwd: ${cwd}`);
       });

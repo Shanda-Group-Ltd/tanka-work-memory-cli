@@ -36,7 +36,7 @@ import {
 } from 'node:fs';
 import { dirname } from 'node:path';
 
-import { syncLockPath } from './config/paths';
+import { scienceExportLockPath, syncLockPath } from './config/paths';
 
 /** A sync should never legitimately run longer than this; older = crashed. */
 const STALE_MS = 30 * 60 * 1000;
@@ -151,12 +151,13 @@ function writeLock(path: string): SyncLock {
 }
 
 /**
- * Try to acquire the sync lock. Returns a {@link SyncLock} on success, or
- * `null` if another live sync already holds it (caller should skip this run).
- * A stale lock (crashed holder / timed out) is stolen transparently.
+ * Try to acquire the advisory lock at `path`. Returns a {@link SyncLock} on
+ * success, or `null` if another live holder already has it (caller should skip).
+ * A stale lock (crashed holder / timed out) is stolen transparently. Generic so
+ * the same steal/margin machinery guards both the sync lock and the
+ * science-export lock — see {@link acquireSyncLock} / {@link acquireScienceExportLock}.
  */
-export function acquireSyncLock(): SyncLock | null {
-  const path = syncLockPath();
+export function acquireLock(path: string): SyncLock | null {
   mkdirSync(dirname(path), { recursive: true });
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -172,4 +173,23 @@ export function acquireSyncLock(): SyncLock | null {
     }
   }
   return null;
+}
+
+/**
+ * Try to acquire the sync lock. Returns a {@link SyncLock} on success, or
+ * `null` if another live sync already holds it (caller should skip this run).
+ */
+export function acquireSyncLock(): SyncLock | null {
+  return acquireLock(syncLockPath());
+}
+
+/**
+ * Try to acquire the science-export lock (distinct from the sync lock). Held
+ * only for the export's duration by whichever writer runs it — an interactive
+ * refresh or a sync's export step — so the two can't `rmtree`+rewrite the same
+ * session dirs at once. `null` means another export is mid-write; skip (the
+ * discovery reader tolerates a half-written tree and the next run self-heals).
+ */
+export function acquireScienceExportLock(): SyncLock | null {
+  return acquireLock(scienceExportLockPath());
 }

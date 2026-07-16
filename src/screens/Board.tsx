@@ -25,6 +25,7 @@ import {
   discoverAllSessions,
   discoverSessionsForProject,
   foldWorktreesToOwner,
+  isScienceCwd,
   type SessionRef,
 } from '../discovery/sessions';
 import { clip, fmtAge, fmtBytes, fmtRelTime, shortId } from '../format';
@@ -44,7 +45,11 @@ import {
   selectModeItems,
 } from '../project-items';
 import { schedulerStatus } from '../scheduler';
-import { runSync, type SyncResult } from '../sync';
+import {
+  refreshScienceExportInteractive,
+  runSync,
+  type SyncResult,
+} from '../sync';
 import { agentColor, theme } from '../theme';
 import { type ProjectsInitialAction, ProjectsScreen } from './ProjectsScreen';
 import { TankaConfigScreen } from './TankaConfigScreen';
@@ -53,6 +58,7 @@ const AGENT_TAG: Record<string, string> = {
   'claude-code': 'CC',
   codex: 'CDX',
   cowork: 'CW',
+  'claude-science': 'CS',
 };
 const LOG_LINES = 3;
 const PROJECT_INFO_HEIGHT = 2 + 1 + 1;
@@ -153,10 +159,15 @@ export function Board(): React.ReactElement {
   const refreshSessions = (): void => setSessNonce((n) => n + 1);
 
   // ── discovery ─────────────────────────────────────────────
-  const allDiscovery = useAsync<SessionRef[]>(
-    () => Promise.resolve().then(() => (isAll ? discoverAllSessions() : [])),
-    [isAll, listNonce],
-  );
+  const allDiscovery = useAsync<SessionRef[]>(async () => {
+    if (!isAll) return [];
+    // Refresh the science export before discovering so the list + counts
+    // reflect the live claude-science DB (discovery only READS the export).
+    // Lock-guarded, incremental, and fully async so it never blocks the Ink
+    // render; one export covers all science projects.
+    await refreshScienceExportInteractive(config.scienceDir);
+    return discoverAllSessions();
+  }, [isAll, listNonce, config.scienceDir]);
 
   // Unified display list — one item per "project" in the left panel, derived
   // by the shared project-items module (same source of truth as the CLI).
@@ -174,15 +185,19 @@ export function Board(): React.ReactElement {
 
   // Sessions for the selected item — all cwdPaths discovered together.
   const cwdKey = selected?.cwdPaths.join('\0') ?? '';
-  const sessDiscovery = useAsync<SessionRef[]>(
-    () =>
-      Promise.resolve().then(() => {
-        if (!selected || selected.cwdPaths.length === 0) return [];
-        const refs = discoverSessionsForProject(selected.cwdPaths);
-        return isAll ? foldWorktreesToOwner(refs) : refs;
-      }),
-    [cwdKey, sessNonce],
-  );
+  const sessDiscovery = useAsync<SessionRef[]>(async () => {
+    if (!selected || selected.cwdPaths.length === 0) return [];
+    // Refresh the science export when the selected project has a science
+    // cwd so its session update badges reflect the live DB, not a stale
+    // export. Covers `r` on the sessions panel (which only re-runs this
+    // hook, not allDiscovery) AND selection changes, in both modes.
+    // Lock-guarded + incremental; an unchanged pass is cheap (aggregate
+    // queries only — message bodies load lazily per re-exported session).
+    if (selected.cwdPaths.some(isScienceCwd))
+      await refreshScienceExportInteractive(config.scienceDir);
+    const refs = discoverSessionsForProject(selected.cwdPaths);
+    return isAll ? foldWorktreesToOwner(refs) : refs;
+  }, [cwdKey, sessNonce, isAll, config.scienceDir]);
 
   const listLoading = isAll && allDiscovery.status === 'loading';
   const localStatus = listLoading ? 'loading' : sessDiscovery.status;

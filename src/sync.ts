@@ -12,20 +12,26 @@
  * have never synced (no mapping yet) are treated as "new" and get a namespace
  * after their remote project is lazily created.
  */
+import { existsSync, utimesSync } from 'node:fs';
+import { join } from 'node:path';
+
 import type { AxiosInstance } from 'axios';
 
 import { createApiClient, listProjects, syncProject } from './api';
 import type { SyncSessionItem } from './api/types';
 import { createProject as apiCreateProject } from './api/work-memory';
 import {
+  DEFAULT_SCIENCE_DIR,
   ensureDeviceIdentity,
   ensureProjectsEnv,
+  expandHome,
   loadConfig,
   loadCredentials,
   type Project,
   projectsForEnv,
   type TankaEnv,
 } from './config/config';
+import { scienceExportDir, scienceExportLockPath } from './config/paths';
 import {
   lookupRemoteProjectId,
   pruneProjectMap,
@@ -41,6 +47,7 @@ import {
   sidecarDelta,
   uploadStatus,
 } from './config/uploads';
+import { runScienceExport } from './discovery/science-export';
 import {
   discoverAllSessions,
   discoverSessionsForProject,
@@ -48,7 +55,7 @@ import {
   syntheticCwdFor,
 } from './discovery/sessions';
 import { log } from './log';
-import { acquireSyncLock } from './sync-lock';
+import { acquireScienceExportLock, acquireSyncLock } from './sync-lock';
 import {
   TokenExpiredError,
   type UploadOutcome,
@@ -116,14 +123,125 @@ async function ensureRemoteProject(
   return remoteId;
 }
 
-/** The backend recognises two agent types; cowork is a Claude Desktop variant. */
-type SyncAgent = 'claude-code' | 'codex';
-function syncAgent(agent: string): SyncAgent {
-  return agent === 'codex' ? 'codex' : 'claude-code';
+/**
+ * Run the claude-science export (SQLite → export dir) so discovery sees a fresh
+ * session tree. Best-effort: any failure is logged and swallowed so it can't
+ * abort a sync that would otherwise upload other agents' sessions.
+ *
+ * Self-guarding, so both callers (a sync's export step and an interactive Board
+ * refresh) share one implementation:
+ *   - Windows: claude-science is macOS/Linux-only, so the export is a hard
+ *     no-op — never touch the DB or spawn the exporter there.
+ *   - No `orgs/` dir under the science dir: nothing to export, return before
+ *     taking any lock (keeps the Board's per-refresh cost to a single stat for
+ *     the majority who don't use claude-science).
+ *   - Otherwise hold the *science-export* lock (NOT the sync lock) for the
+ *     export's duration so an interactive refresh and a sync/cron export can't
+ *     rewrite the same session dirs at once. A held lock → another export is
+ *     already running → skip (discovery tolerates it; the next run self-heals).
+ */
+async function refreshScienceExport(
+  scienceDir: string | undefined,
+): Promise<void> {
+  if (process.platform === 'win32') return; // claude-science: macOS/Linux only
+  // EVERYTHING below sits in one try: acquireScienceExportLock (mkdirSync /
+  // openSync can throw on an unwritable state dir) must not escape either —
+  // a throw here would abort the whole sync / error the Board's discovery.
+  try {
+    const dir = expandHome(scienceDir ?? DEFAULT_SCIENCE_DIR);
+    const outDir = scienceExportDir();
+    // Cheap gate: skip the lock entirely when there is neither a source to
+    // export NOR a previously exported tree to prune (the source-removed case
+    // still needs a run so runScienceExport can clear the stale tree).
+    if (!existsSync(join(dir, 'orgs')) && !existsSync(outDir)) return;
+    const lock = acquireScienceExportLock();
+    if (!lock) return; // another export mid-write; it covers this refresh
+    // Heartbeat: the lock machinery steals any lock older than STALE_MS by
+    // mtime alone, even from a LIVE holder — a first-time export of a huge
+    // dataset running past that would get its staging wiped by a second
+    // writer. Touching the file keeps its mtime fresh, so stealers fall into
+    // the "read the pid, it's alive, don't steal" branch instead.
+    const heartbeat = setInterval(
+      () => {
+        try {
+          const now = new Date();
+          utimesSync(scienceExportLockPath(), now, now);
+        } catch {
+          /* lock gone (stolen/cleaned) — nothing to keep alive */
+        }
+      },
+      5 * 60 * 1000,
+    );
+    try {
+      const s = await runScienceExport({ scienceDir: dir, outDir });
+      for (const w of s.warnings) log('warn', 'sync', `science-export: ${w}`);
+      if (s.projects.length > 0) {
+        const c = s.counts;
+        log(
+          'info',
+          'sync',
+          `science-export: ${s.projects.length} project(s) — ` +
+            `+${c.created} ~${c.updated} .${c.skipped} -${c.pruned}` +
+            (s.incomplete.length
+              ? ` (${s.incomplete.length} still running)`
+              : ''),
+        );
+      }
+    } finally {
+      clearInterval(heartbeat);
+      lock.release();
+    }
+  } catch (e: unknown) {
+    log(
+      'warn',
+      'sync',
+      `science-export failed (skipping science sessions this run): ${
+        e instanceof Error ? e.message : String(e)
+      }`,
+    );
+  }
 }
 
-/** Classify a sidecar file by its session-relative path. */
-function classifySidecar(relPath: string): string {
+/**
+ * Refresh the science export from an interactive context (the Board / cwd
+ * picker) so newly-created or updated science projects show up. Thin wrapper:
+ * `refreshScienceExport` already self-guards (Windows no-op, existence gate,
+ * science-export lock), and crucially does NOT take the *sync* lock — so a
+ * routine display refresh can never make a concurrent `runSync` report "another
+ * sync is already running". Best-effort, never throws.
+ */
+export async function refreshScienceExportInteractive(
+  scienceDir: string | undefined,
+): Promise<void> {
+  await refreshScienceExport(scienceDir);
+}
+
+/**
+ * The agent type sent to the backend. `cowork` is a Claude Desktop variant of
+ * Claude Code and folds into `claude-code`; `codex` and `claude-science` pass
+ * through as their own enums (the backend recognises both). A whitelist, not a
+ * narrowing default — an unknown agent falls back to `claude-code` rather than
+ * being silently mislabelled as a science session.
+ */
+type SyncAgent = 'claude-code' | 'codex' | 'claude-science';
+function syncAgent(agent: string): SyncAgent {
+  if (agent === 'codex') return 'codex';
+  if (agent === 'claude-science') return 'claude-science';
+  return 'claude-code';
+}
+
+/**
+ * Classify a sidecar file into a `sidecarType` tag by its session-relative
+ * path. claude-science groups its sidecars by top-level dir: `details/*` →
+ * "details", `artifacts/**` → "artifacts", and the lone `meta.json` → "meta".
+ * Claude Code's sidecars are keyed by their own subdir prefixes.
+ */
+export function classifySidecar(agent: string, relPath: string): string {
+  if (agent === 'claude-science') {
+    const slash = relPath.indexOf('/');
+    if (slash > 0) return relPath.slice(0, slash); // 'details' | 'artifacts'
+    return relPath.replace(/\.[^.]+$/, ''); // 'meta.json' → 'meta'
+  }
   if (relPath.startsWith('subagents/')) return 'subagent';
   if (relPath.startsWith('tool-results/')) return 'tool-result';
   return 'sidecar';
@@ -168,7 +286,7 @@ function buildSyncItems(
       meta: {
         ...baseMeta,
         parentSessionId: ref.id,
-        sidecarType: classifySidecar(f.relPath),
+        sidecarType: classifySidecar(ref.agent, f.relPath),
         sidecarPath: f.relPath,
       },
       fileId: f.fileId,
@@ -325,6 +443,12 @@ async function runSyncLocked(opts: SyncOptions): Promise<SyncResult> {
   const deviceId = config.deviceId ?? '';
   const deviceName = config.deviceName ?? '';
   const apiClient = createApiClient(credentials);
+
+  // Refresh the claude-science export before discovery so its session tree is
+  // current. Cheap + incremental (unchanged sessions skip via signature). Held
+  // under the sync lock. A failure here must not sink the whole sync — other
+  // agents' sessions still upload — so log and carry on.
+  await refreshScienceExport(config.scienceDir);
 
   const result: SyncResult = {
     uploaded: 0,

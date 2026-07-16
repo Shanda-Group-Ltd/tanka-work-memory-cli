@@ -27,10 +27,26 @@ import {
   renameSync,
   writeFileSync,
 } from 'node:fs';
-import { hostname } from 'node:os';
-import { dirname } from 'node:path';
+import { homedir, hostname } from 'node:os';
+import { dirname, join } from 'node:path';
 
 import { configPath, credentialsPath, tuiHome } from './paths';
+
+/** Literal stored in config for the claude-science data directory. */
+export const DEFAULT_SCIENCE_DIR = '~/.claude-science';
+
+/**
+ * Expand a leading `~` / `~/…` to the user's home directory. We persist the
+ * literal `~/.claude-science` (portable across machines and accounts) and
+ * expand only at the point of use — so every reader must funnel through here
+ * rather than sprinkling `.replace('~', …)`. A non-tilde path is returned
+ * untouched; `~user` (another user's home) is intentionally NOT supported.
+ */
+export function expandHome(p: string): string {
+  if (p === '~') return homedir();
+  if (p.startsWith('~/')) return join(homedir(), p.slice(2));
+  return p;
+}
 
 /** A working directory entry — was `Project` before the concept rename. */
 export interface ProjectCwd {
@@ -116,6 +132,12 @@ export interface Config {
   deviceId?: string;
   /** user-editable device label, pre-filled from platform hostname */
   deviceName?: string;
+  /**
+   * claude-science data directory, stored as a literal (default
+   * `~/.claude-science`, see DEFAULT_SCIENCE_DIR). Expand with `expandHome`
+   * before touching the filesystem. Absent means "use the default".
+   */
+  scienceDir?: string;
 }
 
 export const PROJECT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;

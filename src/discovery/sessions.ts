@@ -11,6 +11,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import type { ProjectCwd } from '../config/config';
+import { scienceExportDir } from '../config/paths';
 
 /**
  * Discover the raw coding-agent session files that touched a given project, so a caller can
@@ -40,7 +41,57 @@ import type { ProjectCwd } from '../config/config';
  * Dedup is per (agent, id) — a session that shows up under multiple match-paths only counts once.
  */
 
-export type SessionAgent = 'claude-code' | 'codex' | 'cowork';
+export type SessionAgent =
+  | 'claude-code'
+  | 'codex'
+  | 'cowork'
+  | 'claude-science';
+
+/**
+ * claude-science sessions have no working directory — they live in an org's
+ * SQLite DB (org → project → session), not on a cwd. We encode a science
+ * project as a synthetic cwd so it can flow through the whole cwd-keyed
+ * pipeline (config.cwds, project-map, sync) unchanged. Format:
+ *
+ *   claude-science://<org_id>/<proj_id>
+ *
+ * The `//` matters: `claude-science://x` is NOT an absolute path, so
+ * `path.resolve()` mangles it into `<process.cwd()>/claude-science:/x`
+ * (collapsing `//` → `/`). That collapse is a deterministic fingerprint of a
+ * leaked `path.resolve` — `project-map` asserts against it on write. Every
+ * cwd-as-directory touchpoint (worktree folding, fs probes, git) must branch
+ * on `isScienceCwd` and skip the directory logic; a science session already
+ * carries its project attribution and never needs path matching.
+ */
+export const SCIENCE_CWD_PREFIX = 'claude-science://';
+
+export function isScienceCwd(cwd: string): boolean {
+  return cwd.startsWith(SCIENCE_CWD_PREFIX);
+}
+
+/** Build the synthetic cwd for an org/project pair. */
+export function scienceCwd(orgId: string, projId: string): string {
+  return `${SCIENCE_CWD_PREFIX}${orgId}/${projId}`;
+}
+
+/**
+ * Parse a science cwd back into its org/project ids, or null if malformed.
+ * Strict on purpose — this doubles as the input validator for user-supplied
+ * cwds (migrate --cwd): a projId containing '/' (e.g. a shell-completion
+ * trailing slash) would bind a project-map key that discovery's canonical
+ * `scienceCwd(org, proj)` form can never match, silently re-routing uploads.
+ */
+export function parseScienceCwd(
+  cwd: string,
+): { orgId: string; projId: string } | null {
+  if (!isScienceCwd(cwd)) return null;
+  const rest = cwd.slice(SCIENCE_CWD_PREFIX.length);
+  const slash = rest.indexOf('/');
+  if (slash <= 0 || slash === rest.length - 1) return null;
+  const projId = rest.slice(slash + 1);
+  if (projId.includes('/')) return null; // trailing slash / extra segments
+  return { orgId: rest.slice(0, slash), projId };
+}
 
 export interface SidecarFile {
   /** path relative to the sidecar dir, POSIX "/"-separated (e.g. "subagents/agent-a1.jsonl") */
@@ -157,6 +208,9 @@ export function cwdEqualsAny(
   fold: (p: string) => string = foldPath,
 ): candidate is string {
   if (!candidate) return false;
+  // A science cwd is a synthetic identifier, not a path — `path.resolve` would
+  // mangle it (and its roots are stored un-resolved), so compare verbatim.
+  if (isScienceCwd(candidate)) return roots.some((root) => candidate === root);
   const r = fold(path.resolve(candidate));
   return roots.some((root) => r === fold(root));
 }
@@ -262,6 +316,12 @@ export function expandToWorktreeUnion(
 ): string[] {
   const seen = new Set<string>();
   for (const c of cwds) {
+    // A science cwd has no filesystem path and no worktrees — pass it through
+    // verbatim (path.resolve would mangle the URI and git would find nothing).
+    if (isScienceCwd(c)) {
+      seen.add(c);
+      continue;
+    }
     const abs = path.resolve(c);
     if (!seen.has(abs)) seen.add(abs);
     const wts = worktreesOf(abs);
@@ -496,6 +556,133 @@ function walkCoworkMetas(root: string, maxDepth: number): string[] {
   return out;
 }
 
+/** Light index fields lifted from a science session's meta.json into
+ * SessionRef.meta (strings only, absent keys omitted). The full meta.json is
+ * uploaded verbatim as a sidecar; this is just what the Board/sync surface. */
+function readScienceMeta(sessionDir: string): Record<string, string> {
+  const meta: Record<string, string> = {};
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(readFileSync(path.join(sessionDir, 'meta.json'), 'utf8'));
+  } catch {
+    return meta;
+  }
+  const put = (key: string, val: unknown): void => {
+    if (val === null || val === undefined) return;
+    const s = String(val).trim();
+    if (s) meta[key] = s;
+  };
+  put('model', raw.model);
+  put('effort', raw.effort);
+  put('status', raw.status);
+  put('name', raw.name);
+  put('agentName', raw.agent_name);
+  put('taskSummary', raw.task_summary);
+  // Guard the Date conversion: a corrupt meta.json could carry NaN/Infinity or
+  // an out-of-range epoch, and `new Date(x).toISOString()` throws on those.
+  if (typeof raw.created_at === 'number' && Number.isFinite(raw.created_at)) {
+    try {
+      put('startedAt', new Date(raw.created_at).toISOString());
+    } catch {
+      /* out-of-range epoch → omit startedAt */
+    }
+  }
+  return meta;
+}
+
+/**
+ * Build SessionRefs for one science cwd by reading its exported session tree
+ * (written by `runScienceExport`). Each `sessions/<uuid>/` dir yields one ref:
+ * `session.jsonl` is the transcript (the upload layer renames it to
+ * `transcript.jsonl`), and every other file — meta.json, details/*, artifacts/*
+ * — rides along as a sidecar. A dir with no session.jsonl is a half-written
+ * export and is skipped. `exportDir` is injectable for tests.
+ */
+export function discoverScienceSessions(
+  cwd: string,
+  exportDir: string = scienceExportDir(),
+): SessionRef[] {
+  const parsed = parseScienceCwd(cwd);
+  if (!parsed) return [];
+  const sessionsRoot = path.join(
+    exportDir,
+    parsed.orgId,
+    parsed.projId,
+    'sessions',
+  );
+  if (!isDir(sessionsRoot)) return [];
+  let dirs: string[] = [];
+  try {
+    dirs = readdirSync(sessionsRoot).filter((d) =>
+      isDir(path.join(sessionsRoot, d)),
+    );
+  } catch {
+    return [];
+  }
+  const out: SessionRef[] = [];
+  for (const id of dirs) {
+    const sessionDir = path.join(sessionsRoot, id);
+    const mainPath = path.join(sessionDir, 'session.jsonl');
+    let st: ReturnType<typeof statSync>;
+    try {
+      st = statSync(mainPath);
+    } catch {
+      continue; // no transcript → half-written export, skip
+    }
+    const sidecarFiles = walkSidecar(sessionDir).filter(
+      (f) => f.relPath !== 'session.jsonl',
+    );
+    out.push({
+      id,
+      agent: 'claude-science',
+      path: mainPath,
+      cwd,
+      sizeBytes: st.size,
+      mtimeMs: st.mtimeMs,
+      meta: readScienceMeta(sessionDir),
+      sidecarFiles,
+    });
+  }
+  return out;
+}
+
+/**
+ * Count a science project's sessions without building full SessionRefs — one
+ * `statSync` per session dir (checking the transcript exists), no `walkSidecar`
+ * over every artifact/detail file. For the picker's session-count column, where
+ * only the number matters.
+ */
+export function countScienceSessions(
+  cwd: string,
+  exportDir: string = scienceExportDir(),
+): number {
+  const parsed = parseScienceCwd(cwd);
+  if (!parsed) return 0;
+  const sessionsRoot = path.join(
+    exportDir,
+    parsed.orgId,
+    parsed.projId,
+    'sessions',
+  );
+  if (!isDir(sessionsRoot)) return 0;
+  let dirs: string[] = [];
+  try {
+    dirs = readdirSync(sessionsRoot);
+  } catch {
+    return 0;
+  }
+  let n = 0;
+  for (const id of dirs) {
+    try {
+      if (statSync(path.join(sessionsRoot, id, 'session.jsonl')).isFile())
+        n += 1;
+    } catch {
+      /* no transcript → half-written, don't count */
+    }
+  }
+  return n;
+}
+
 /**
  * Discover sessions across all of a project's registered cwds plus their git worktrees.
  *
@@ -505,10 +692,6 @@ function walkCoworkMetas(root: string, maxDepth: number): string[] {
 export function discoverSessionsForProject(
   cwds: readonly string[],
 ): SessionRef[] {
-  const roots = expandToWorktreeUnion(cwds);
-  if (roots.length === 0) return [];
-  const fastDirNames = new Set(roots.map((r) => foldPath(claudeEncodedDir(r))));
-
   const out: SessionRef[] = [];
   const seen = new Set<string>();
   const add = (ref: SessionRef): void => {
@@ -517,6 +700,20 @@ export function discoverSessionsForProject(
     seen.add(key);
     out.push(ref);
   };
+
+  // ── claude-science ───────────────────────────────────────
+  // Science cwds are synthetic identifiers, not directories: they map to an
+  // already-exported session tree, not an agent store. Handle them first and
+  // keep them out of the worktree/encoded-dir machinery below (which would
+  // mangle the URI via path.resolve and find nothing).
+  const scienceCwds = cwds.filter(isScienceCwd);
+  for (const c of scienceCwds)
+    for (const ref of discoverScienceSessions(c)) add(ref);
+
+  const regularCwds = cwds.filter((c) => !isScienceCwd(c));
+  const roots = expandToWorktreeUnion(regularCwds);
+  if (roots.length === 0) return out;
+  const fastDirNames = new Set(roots.map((r) => foldPath(claudeEncodedDir(r))));
 
   // ── Claude Code ──────────────────────────────────────────
   const ccRoot = path.join(os.homedir(), '.claude', 'projects');
@@ -813,6 +1010,10 @@ export function owningWorktree(
   cwd: string,
   worktreesOf: (cwd: string) => string[] = gitWorktreesFor,
 ): string {
+  // A science cwd is a synthetic identifier with no worktrees — returning it
+  // verbatim also spares a doomed `git -C claude-science://…` subprocess that
+  // foldWorktreesToOwner would otherwise spawn per science cwd per call.
+  if (isScienceCwd(cwd)) return cwd;
   const wts = worktreesOf(cwd);
   const f = foldPath(cwd);
   return wts.some((w) => foldPath(w) === f) ? wts[0]! : cwd;
@@ -855,10 +1056,60 @@ export function foldWorktreesToOwner(
 export function discoverAllSessions(): SessionRef[] {
   const cwds = scanSessionCwds().map((s) => s.cwd);
   cwds.push(path.join(os.homedir(), 'Claude')); // Cowork catch-all for folder-less sessions
+  cwds.push(...scienceExportCwds()); // exported claude-science projects (each its own cwd)
   const refs = discoverSessionsForProject(cwds).filter(
     (r) => !isIgnoredCwd(r.cwd),
   );
   return foldWorktreesToOwner(refs, gitWorktreesFor);
+}
+
+/**
+ * Enumerate the synthetic cwds of every exported science project — one per
+ * `<exportDir>/<org>/<proj>/` dir that has a `sessions/` subdir. Feeds 'all'
+ * mode: each becomes its own project, lazily mapped like any other cwd.
+ */
+export function scienceExportCwds(
+  exportDir: string = scienceExportDir(),
+): string[] {
+  if (!isDir(exportDir)) return [];
+  const out: string[] = [];
+  let orgs: string[] = [];
+  try {
+    orgs = readdirSync(exportDir).filter((o) => isDir(path.join(exportDir, o)));
+  } catch {
+    return [];
+  }
+  for (const org of orgs) {
+    const orgDir = path.join(exportDir, org);
+    let projs: string[] = [];
+    try {
+      projs = readdirSync(orgDir).filter((p) =>
+        isDir(path.join(orgDir, p, 'sessions')),
+      );
+    } catch {
+      continue;
+    }
+    for (const proj of projs) out.push(scienceCwd(org, proj));
+  }
+  return out;
+}
+
+/** Read a science project's display name from its exported project.json. */
+function readScienceProjectName(cwd: string): string | undefined {
+  const parsed = parseScienceCwd(cwd);
+  if (!parsed) return undefined;
+  try {
+    const p = path.join(
+      scienceExportDir(),
+      parsed.orgId,
+      parsed.projId,
+      'project.json',
+    );
+    const j = JSON.parse(readFileSync(p, 'utf8')) as { name?: unknown };
+    return typeof j.name === 'string' && j.name.trim() ? j.name : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function slugify(s: string): string {
@@ -875,6 +1126,18 @@ function slugify(s: string): string {
  * the unique session id.
  */
 export function syntheticCwdFor(cwd: string): ProjectCwd {
+  // Science cwds carry no path — derive id from the project id and the display
+  // name from the exported project.json (falling back to the id), so 'all' mode
+  // creates the remote project under its real name, not "proj_xxxx".
+  if (isScienceCwd(cwd)) {
+    const parsed = parseScienceCwd(cwd);
+    const projId = parsed?.projId ?? cwd;
+    return {
+      id: slugify(projId) || 'sessions',
+      name: readScienceProjectName(cwd) ?? projId,
+      cwd,
+    };
+  }
   const base = path.basename(cwd);
   return { id: slugify(base) || 'sessions', name: base || cwd, cwd };
 }

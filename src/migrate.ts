@@ -34,7 +34,11 @@ import {
   remapProjectId,
 } from './config/project-map';
 import { migrateProjectManifest } from './config/uploads';
-import { owningWorktree } from './discovery/sessions';
+import {
+  isScienceCwd,
+  owningWorktree,
+  parseScienceCwd,
+} from './discovery/sessions';
 import { acquireSyncLock, type SyncLock } from './sync-lock';
 
 export interface MigrateOptions {
@@ -154,7 +158,25 @@ export function runMigrateForCwd(
   return withLock(async () => {
     const config = opts.config ?? loadConfig();
     const env = credentials.env;
-    const cwd = owningWorktree(path.resolve(cwdArg));
+    // A science cwd is a synthetic identifier: don't resolve it (path.resolve
+    // mangles the URI) or fold it to a worktree (git finds nothing) — use it
+    // verbatim as the project-map key. Anything science-shaped (the loose
+    // `claude-science:` prefix catches single-slash typos that path.resolve
+    // would otherwise mangle into an internal-assertion error downstream) must
+    // parse as a full org/proj URI, or the user gets a clear input error here.
+    let cwd: string;
+    // 'claude-science:/' (not the bare 'claude-science:') so a REAL relative
+    // directory named e.g. `claude-science:notes` (colon is legal on POSIX)
+    // still resolves as a path; the slash-ful forms are unambiguous URIs/typos.
+    if (cwdArg.startsWith('claude-science:/')) {
+      if (!parseScienceCwd(cwdArg))
+        throw new Error(
+          `invalid claude-science cwd "${cwdArg}" — expected claude-science://<org_id>/<proj_id>`,
+        );
+      cwd = cwdArg;
+    } else {
+      cwd = owningWorktree(path.resolve(cwdArg));
+    }
     const target = resolveProjectId(config, env, targetArg);
 
     const source = lookupRemoteProjectId(env, cwd);
@@ -170,17 +192,21 @@ export function runMigrateForCwd(
 
     // No mapping. Require the directory to actually exist before joining —
     // a mapped-but-deleted dir is a valid migrate source above, but an
-    // unmapped non-directory is almost certainly a typo or a project id.
-    let isDir = false;
-    try {
-      isDir = statSync(cwd).isDirectory();
-    } catch {
-      /* missing — handled below */
+    // unmapped non-directory is almost certainly a typo or a project id. A
+    // science cwd is never a real directory, so skip the guard: an unmapped
+    // science project legitimately joins the target (first sync uploads there).
+    if (!isScienceCwd(cwd)) {
+      let isDir = false;
+      try {
+        isDir = statSync(cwd).isDirectory();
+      } catch {
+        /* missing — handled below */
+      }
+      if (!isDir)
+        throw new Error(
+          `${cwd} is not a directory (and has no project mapping) — pass a project id instead?`,
+        );
     }
-    if (!isDir)
-      throw new Error(
-        `${cwd} is not a directory (and has no project mapping) — pass a project id instead?`,
-      );
 
     await joinProject(createApiClient(credentials), target);
     recordProjectMapping(env, cwd, target);

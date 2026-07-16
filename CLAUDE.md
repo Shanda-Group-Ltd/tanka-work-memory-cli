@@ -1,9 +1,9 @@
 # tanka-work-memory-cli
 
 `tanka-wm` — a single-package bun CLI + Ink TUI that discovers Claude Code /
-Codex / Cowork session transcripts per project and syncs them to Tanka cloud
-storage via the work-memory backend API. See `README.md` for the user-facing
-overview and `AGENT-SETUP.md` for a non-interactive setup procedure.
+Codex / Cowork / claude-science session transcripts per project and syncs them
+to Tanka cloud storage via the work-memory backend API. See `README.md` for the
+user-facing overview and `AGENT-SETUP.md` for a non-interactive setup procedure.
 
 ## Toolchain — bun, not node
 
@@ -51,14 +51,33 @@ bun run build      # scripts/build-binaries.mjs → dist/tanka-wm-<platform>
   cwdIds, origin }`). In select mode one project has N cwds; in all mode
   each cwd is its own project (1:1, lazily created on first sync).
 - **Config** — `config.json` holds `cwds: ProjectCwd[]`,
-  `projects?: Project[]`, `deviceId`, `deviceName`, `mode`, `wizardStep`.
+  `projects?: Project[]`, `deviceId`, `deviceName`, `mode`, `wizardStep`,
+  `scienceDir?` (claude-science data dir override, stored as a `~`-literal;
+  expand with `expandHome` before touching the filesystem).
+- **Science cwd** — a claude-science project is encoded as the synthetic cwd
+  `claude-science://<org_id>/<proj_id>` (one project ≡ one cwd, both modes).
+  It is an identifier, NOT a path: `path.resolve` would mangle it (collapsing
+  `//`→`/`), so every cwd-as-directory touchpoint branches on `isScienceCwd`
+  and `project-map` fail-loud asserts against the mangled single-slash form.
 
 ### Key modules
 
 - `src/discovery/sessions.ts` + `transcript.ts` — session discovery (Claude
-  Code / Codex / Cowork, cross-platform). `syntheticCwdFor(cwd)` creates
-  virtual ProjectCwd entries for all mode. Both git calls pass
-  `windowsHide: true`.
+  Code / Codex / Cowork / claude-science, cross-platform). `syntheticCwdFor(cwd)`
+  creates virtual ProjectCwd entries for all mode. Both git calls pass
+  `windowsHide: true`. Science discovery reads the exported tree (below):
+  `session.jsonl` is the transcript, everything else (meta.json, details/*,
+  artifacts/*) rides along as sidecars.
+- `src/discovery/science-export.ts` — TS port of the claude-science exporter:
+  reads per-org SQLite DBs (`<scienceDir>/orgs/<org>/operon-cli.db`, bun:sqlite,
+  WAL read transaction) and writes `~/.tanka-wm/claude_science_export/<org>/
+  <proj>/sessions/<root_frame>/…` incrementally (per-session
+  `_export_signature`; sessions build in a `.staging/` dir then rename-swap so
+  readers never see a torn dir; deleted sessions/projects/orgs are pruned at
+  every level, including source-removed). macOS/Linux only — `refreshScienceExport`
+  in sync.ts hard-no-ops on win32. Runs before discovery on sync, Board refresh,
+  and picker rescan, guarded by `science-export.lock` (NOT the sync lock, so a
+  display refresh can never make `runSync` report "already running").
 - `src/api/` — axios client for the work-memory business endpoints. Uses the
   **same** base URL as file upload (via `resolveBaseUrl()`, no separate gateway)
   and only a `token` header (no signing). `client.ts` creates an instance with
@@ -88,7 +107,9 @@ bun run build      # scripts/build-binaries.mjs → dist/tanka-wm-<platform>
   `runMigrateForCwd(dir, dstId)` (CLI `migrate --cwd <dir> <dst>`) — the cwd
   form folds the dir to its owning worktree, then migrates if project-mapped,
   else JOINS the target + records the project-map binding (nothing to move
-  yet; first sync uploads there). Both TUI entries (ProjectsScreen `m` and
+  yet; first sync uploads there). A science cwd is used verbatim (no resolve /
+  worktree fold / dir guard) but must parse as a full
+  `claude-science://<org>/<proj>` URI or the command errors up front. Both TUI entries (ProjectsScreen `m` and
   all-mode Board `m`) share one `MigrateModal`, parameterized by a
   `MigrateSource` union (`project` → runMigrate · `cwd` → runMigrateForCwd).
   Known limit (accepted): the server call and the local re-points are not
@@ -143,19 +164,27 @@ Two stages per session:
   no separate `-gw` gateway and no request signing.
 - State lives under `~/.tanka-wm/` (override `TANKA_WM_HOME`, used by tests):
   - `config.json` — cwds, projects (each carries `env`), mode, wizardStep,
-    deviceId, deviceName
+    deviceId, deviceName, scienceDir?
   - `credentials.json` 0600 — token + env
   - `uploads/<env>/<ns>.json` — manifest shards per env per project namespace
     (`ns` = remoteProjectId); env-isolated so switching env can't cross-contaminate
   - `project-map/<env>.json` — all-mode cwd→remoteProjectId mapping, one per env
   - `schedule.json` — installed cron expr echo
   - `sync.lock` — advisory lock held for the duration of a `runSync`
+  - `science-export.lock` — advisory lock held while the science export writes
+    (separate from sync.lock on purpose; see science-export module notes)
+  - `claude_science_export/` — the exported claude-science session tree
+    (derived cache; not env-namespaced — it mirrors the local DB verbatim)
+  - `wm.log` — append-only activity log (TUI + cron sync)
+  - `update-state.json` — self-update bookkeeping
 
 ## Wizard
 
 - 4 steps (select): mode → tanka → projects → cron
 - 3 steps (all): mode → tanka → cron
-- Tanka step: env + token + deviceName (editable) + deviceId (read-only)
+- Tanka step: env + token + deviceName (editable) + deviceId (read-only) +
+  claude-science data dir (editable, default `~/.claude-science`; clearing the
+  field resets to the default)
 - Projects step (select only): `ProjectsScreen` —
   create/join/edit/migrate/delete/leave
 

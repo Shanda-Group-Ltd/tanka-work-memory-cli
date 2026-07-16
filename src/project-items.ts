@@ -10,6 +10,7 @@ import {
   cwdEqualsAny,
   discoverSessionsForProject,
   expandToWorktreeUnion,
+  isScienceCwd,
   type SessionRef,
   syntheticCwdFor,
 } from './discovery/sessions';
@@ -46,7 +47,28 @@ export function allModeItems(
         sessions,
       };
     })
-    .sort((a, b) => a.name.localeCompare(b.name));
+    .sort(
+      scienceFirst(
+        (it) => it.cwdPaths[0],
+        (a, b) => a.name.localeCompare(b.name),
+      ),
+    );
+}
+
+/**
+ * A comparator that floats claude-science items to the top, then falls back to
+ * `then` within each group. `cwdOf` extracts the item's primary cwd.
+ */
+function scienceFirst<T>(
+  cwdOf: (it: T) => string | undefined,
+  then: (a: T, b: T) => number,
+): (a: T, b: T) => number {
+  return (a, b) => {
+    const as = isScienceCwd(cwdOf(a) ?? '');
+    const bs = isScienceCwd(cwdOf(b) ?? '');
+    if (as !== bs) return as ? -1 : 1;
+    return then(a, b);
+  };
 }
 
 /** Select mode: one item per configured project of `env`. */

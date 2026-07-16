@@ -10,7 +10,11 @@ import { HintBar, ScreenFrame } from '../components/ScreenFrame';
 import { Spinner } from '../components/Spinner';
 import { TextInput } from '../components/TextInput';
 import { applyTextKey } from '../components/textEditing';
-import { DEFAULT_TANKA_ENV, type TankaEnv } from '../config/config';
+import {
+  DEFAULT_SCIENCE_DIR,
+  DEFAULT_TANKA_ENV,
+  type TankaEnv,
+} from '../config/config';
 import { useConfig } from '../hooks/useConfig';
 import { useScreenInput } from '../hooks/useScreenInput';
 import { theme } from '../theme';
@@ -24,8 +28,9 @@ const ENV_ROW = 0;
 const TOKEN_ROW = 1;
 const DEVICE_NAME_ROW = 2;
 const DEVICE_ID_ROW = 3;
-const ACTION_ROW = 4;
-const ROW_COUNT = 5;
+const SCIENCE_DIR_ROW = 4;
+const ACTION_ROW = 5;
+const ROW_COUNT = 6;
 
 type TestState = { status: 'idle' | 'testing' | 'error'; message?: string };
 
@@ -58,6 +63,9 @@ export function TankaConfigScreen({
   const [token, setToken] = useState<string>(credentials?.token ?? '');
   const [env, setEnv] = useState<TankaEnv>(initialEnv);
   const [deviceName, setDeviceName] = useState<string>(config.deviceName ?? '');
+  const [scienceDir, setScienceDir] = useState<string>(
+    config.scienceDir ?? DEFAULT_SCIENCE_DIR,
+  );
   const [focus, setFocus] = useState(0);
   const [reveal, setReveal] = useState(false);
   const [test, setTest] = useState<TestState>({ status: 'idle' });
@@ -72,9 +80,24 @@ export function TankaConfigScreen({
     testConnection(token.trim(), env).then(
       () => {
         setCredentials({ token: token.trim(), env });
+        const next = { ...config };
+        let changed = false;
         if (deviceName.trim() && deviceName.trim() !== config.deviceName) {
-          setConfig({ ...config, deviceName: deviceName.trim() });
+          next.deviceName = deviceName.trim();
+          changed = true;
         }
+        const sd = scienceDir.trim();
+        if (sd && sd !== (config.scienceDir ?? DEFAULT_SCIENCE_DIR)) {
+          next.scienceDir = sd;
+          changed = true;
+        } else if (!sd && config.scienceDir !== undefined) {
+          // Field cleared → drop the override so the default applies again
+          // (otherwise the old custom path silently survives behind the
+          // default-looking placeholder).
+          delete next.scienceDir;
+          changed = true;
+        }
+        if (changed) setConfig(next);
         onSaved();
       },
       (e: unknown) =>
@@ -156,6 +179,15 @@ export function TankaConfigScreen({
         return;
       }
       setDeviceName((s) => applyTextKey(s, input, key));
+      return;
+    }
+    // claude-science dir row — editable text field
+    if (focus === SCIENCE_DIR_ROW) {
+      if (key.return) {
+        testAndSave();
+        return;
+      }
+      setScienceDir((s) => applyTextKey(s, input, key));
       return;
     }
   });
@@ -248,6 +280,21 @@ export function TankaConfigScreen({
           <Text color={theme.dim}>
             {config.deviceId ?? '(auto-generated on first run)'}
           </Text>
+        </Box>
+
+        {/* claude-science data dir — editable */}
+        <Box marginTop={1}>
+          <Text color={focus === SCIENCE_DIR_ROW ? theme.brand : theme.dim}>
+            {focus === SCIENCE_DIR_ROW ? '❯ ' : '  '}
+          </Text>
+          <Text color={focus === SCIENCE_DIR_ROW ? theme.text : theme.dim}>
+            {'claude science'.padEnd(16)}
+          </Text>
+          <TextInput
+            value={scienceDir}
+            focused={focus === SCIENCE_DIR_ROW}
+            placeholder={DEFAULT_SCIENCE_DIR}
+          />
         </Box>
 
         {/* test & save */}

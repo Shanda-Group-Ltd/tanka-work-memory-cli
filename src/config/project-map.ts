@@ -51,10 +51,32 @@ export function saveProjectMap(env: TankaEnv, map: ProjectMap): void {
   }
 }
 
+/**
+ * Guard against a science cwd key that a stray `path.resolve` has mangled.
+ * `claude-science://x` is not an absolute path, so `path.resolve` prepends the
+ * process cwd AND collapses the `//` to `/` — leaving `…/claude-science:/x`.
+ * That single-slash form is a deterministic fingerprint: a genuine science cwd
+ * always keeps its `//`. Persisting the mangled key would write a
+ * process-cwd-dependent entry no later lookup can reproduce, so we fail loud at
+ * the map boundary rather than corrupt the map. See `isScienceCwd` for the
+ * touchpoints that must branch to keep this from firing.
+ */
+function assertUnmangledScienceKey(cwdPath: string): void {
+  if (
+    cwdPath.includes('claude-science:/') &&
+    !cwdPath.includes('claude-science://')
+  )
+    throw new Error(
+      `mangled science cwd key "${cwdPath}" — a path.resolve() leaked through; ` +
+        'the science cwd must reach project-map verbatim (see isScienceCwd)',
+    );
+}
+
 export function lookupRemoteProjectId(
   env: TankaEnv,
   cwdPath: string,
 ): string | undefined {
+  assertUnmangledScienceKey(cwdPath);
   const map = loadProjectMap(env);
   return map[foldPath(cwdPath)];
 }
@@ -64,6 +86,7 @@ export function recordProjectMapping(
   cwdPath: string,
   remoteProjectId: string,
 ): void {
+  assertUnmangledScienceKey(cwdPath);
   const map = loadProjectMap(env);
   map[foldPath(cwdPath)] = remoteProjectId;
   saveProjectMap(env, map);

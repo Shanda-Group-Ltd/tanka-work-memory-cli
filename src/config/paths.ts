@@ -77,3 +77,30 @@ export function syncLockPath(): string {
 export function updateStatePath(): string {
   return join(tuiHome(), 'update-state.json');
 }
+
+/**
+ * Where `runScienceExport` writes the claude-science session tree (org →
+ * project → session), and where science discovery reads it back. Under tuiHome
+ * so it's covered by TANKA_WM_HOME in tests. Not env-namespaced — the export is
+ * a verbatim mirror of the local DB, independent of the upload target.
+ *
+ * DISPOSABLE, fully derived state: every export pass deletes any subdir not
+ * present in the current source (deleted sessions/projects/orgs are pruned;
+ * a removed source wipes the whole tree). Never store anything here that
+ * cannot be regenerated from the claude-science DB.
+ */
+export function scienceExportDir(): string {
+  return join(tuiHome(), 'claude_science_export');
+}
+
+/**
+ * Advisory lock guarding writes to {@link scienceExportDir}. Separate from the
+ * sync lock on purpose: the science export runs on the interactive display path
+ * (Board refresh, cwd picker) AND inside a sync, so a display refresh must not
+ * contend for the *sync* lock — that would make a concurrent `runSync` report
+ * "another sync is already running" and skip. This lock only serialises the two
+ * export writers (interactive vs sync/cron) against each other.
+ */
+export function scienceExportLockPath(): string {
+  return join(tuiHome(), 'science-export.lock');
+}
