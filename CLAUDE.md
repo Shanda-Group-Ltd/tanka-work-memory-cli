@@ -66,8 +66,11 @@ bun run build      # scripts/build-binaries.mjs → dist/tanka-wm-<platform>
   Code / Codex / Cowork / claude-science, cross-platform). `syntheticCwdFor(cwd)`
   creates virtual ProjectCwd entries for all mode. Both git calls pass
   `windowsHide: true`. Science discovery reads the exported tree (below):
-  `session.jsonl` is the transcript, everything else (meta.json, details/*,
-  artifacts/*) rides along as sidecars.
+  `session.jsonl` is the transcript; sidecars are the CLOSED allowlist
+  `isScienceSidecar` (meta.json, details/*, artifacts/*) — a new exporter
+  output shape must be added there too (a lockstep test in science.test.ts
+  fails otherwise). `walkSidecar` additionally skips OS junk (.DS_Store etc.
+  and `._*` AppleDouble) for every agent's sidecar tree.
 - `src/discovery/science-export.ts` — TS port of the claude-science exporter:
   reads per-org SQLite DBs (`<scienceDir>/orgs/<org>/operon-cli.db`, bun:sqlite,
   WAL read transaction) and writes `~/.tanka-wm/claude_science_export/<org>/

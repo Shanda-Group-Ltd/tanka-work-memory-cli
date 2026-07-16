@@ -465,6 +465,15 @@ function walkJsonl(root: string, maxDepth: number): string[] {
 }
 
 /**
+ * OS metadata files that Finder/Explorer drop into any browsed directory —
+ * never session data, so the walker skips them at every depth. AppleDouble
+ * companions (`._<name>`, written by macOS on non-native volumes and by
+ * archive extraction) are matched by prefix in the walk itself; no agent's
+ * real sidecar files start with `._`.
+ */
+const OS_JUNK_FILES = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini']);
+
+/**
  * Recursively list every file under a session's sidecar dir, returning each with its POSIX
  * relative path. Depth-limited (the real tree is shallow) and silently degrading.
  */
@@ -479,6 +488,7 @@ export function walkSidecar(root: string): SidecarFile[] {
       return;
     }
     for (const e of entries) {
+      if (OS_JUNK_FILES.has(e) || e.startsWith('._')) continue;
       const abs = path.join(dir, e);
       const childRel = rel ? `${rel}/${e}` : e;
       let st: ReturnType<typeof statSync>;
@@ -591,12 +601,28 @@ function readScienceMeta(sessionDir: string): Record<string, string> {
 }
 
 /**
+ * The science sidecar allowlist: `meta.json` plus anything under `details/` or
+ * `artifacts/` — the only shapes `runScienceExport` writes. The export tree is
+ * a real directory the user can browse, so an "everything but session.jsonl"
+ * rule would sweep stray files (Finder droppings, hand-made notes) into the
+ * upload; only the exporter's own output rides along.
+ */
+function isScienceSidecar(relPath: string): boolean {
+  return (
+    relPath === 'meta.json' ||
+    relPath.startsWith('details/') ||
+    relPath.startsWith('artifacts/')
+  );
+}
+
+/**
  * Build SessionRefs for one science cwd by reading its exported session tree
  * (written by `runScienceExport`). Each `sessions/<uuid>/` dir yields one ref:
  * `session.jsonl` is the transcript (the upload layer renames it to
- * `transcript.jsonl`), and every other file — meta.json, details/*, artifacts/*
- * — rides along as a sidecar. A dir with no session.jsonl is a half-written
- * export and is skipped. `exportDir` is injectable for tests.
+ * `transcript.jsonl`), and the allowlisted export shapes — meta.json,
+ * details/*, artifacts/* — ride along as sidecars (see `isScienceSidecar`).
+ * A dir with no session.jsonl is a half-written export and is skipped.
+ * `exportDir` is injectable for tests.
  */
 export function discoverScienceSessions(
   cwd: string,
@@ -629,8 +655,8 @@ export function discoverScienceSessions(
     } catch {
       continue; // no transcript → half-written export, skip
     }
-    const sidecarFiles = walkSidecar(sessionDir).filter(
-      (f) => f.relPath !== 'session.jsonl',
+    const sidecarFiles = walkSidecar(sessionDir).filter((f) =>
+      isScienceSidecar(f.relPath),
     );
     out.push({
       id,

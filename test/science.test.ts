@@ -5,11 +5,13 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import type { Config, Credentials } from '../src/config/config';
 import { expandHome } from '../src/config/config';
@@ -131,6 +133,16 @@ function fixtureExport(): { dir: string; cleanup: () => void } {
     '{"artifact_id":"art1"}\n',
   );
   writeFileSync(join(sd, 'artifacts', 'art1', 'v1_data.csv'), 'a,b\n1,2\n');
+  // pollution: Finder droppings + a stray non-export file — none may become sidecars
+  writeFileSync(join(sd, '.DS_Store'), 'junk');
+  writeFileSync(join(sd, 'artifacts', 'art1', '.DS_Store'), 'junk');
+  // AppleDouble companion nested in an allowlisted dir — only the `._` prefix
+  // skip catches it (it would pass the startsWith('artifacts/') allowlist)
+  writeFileSync(join(sd, 'artifacts', 'art1', '._v1_data.csv'), 'junk');
+  writeFileSync(
+    join(sd, 'notes.txt'),
+    'hand-made note outside the export shape',
+  );
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
@@ -149,7 +161,8 @@ test('discoverScienceSessions builds a SessionRef from the export tree', () => {
     assert.equal(r.meta.name, '研究项目会话');
     assert.equal(r.meta.model, 'claude-opus-4-8');
     assert.equal(r.meta.startedAt, new Date(1784169271633).toISOString());
-    // sidecars: meta.json + details/* + artifacts/*, but NOT session.jsonl
+    // sidecars: the allowlist meta.json + details/* + artifacts/* ONLY —
+    // session.jsonl, .DS_Store (root and nested) and stray files stay out
     const rels = r.sidecarFiles.map((f) => f.relPath).sort();
     assert.deepEqual(rels, [
       'artifacts/_artifacts.jsonl',
@@ -477,6 +490,41 @@ test('runMigrateForCwd rejects malformed science cwds with a clear error', async
     if (prev === undefined) delete process.env.TANKA_WM_HOME;
     else process.env.TANKA_WM_HOME = prev;
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('discovery uploads every file the real exporter writes (allowlist ↔ exporter lockstep)', async () => {
+  // Guards the closed isScienceSidecar allowlist against exporter drift: if a
+  // future runScienceExport writes a new session-dir shape, it must show up in
+  // sidecarFiles — a silent drop here means silent data loss at upload time.
+  const scienceDir = mkdtempSync(join(tmpdir(), 'tanka-sci-lock-'));
+  const outDir = mkdtempSync(join(tmpdir(), 'tanka-sci-lockout-'));
+  const listFiles = (dir: string, rel = ''): string[] =>
+    readdirSync(dir).flatMap((e) => {
+      const abs = join(dir, e);
+      const r = rel ? `${rel}/${e}` : e;
+      return statSync(abs).isDirectory() ? listFiles(abs, r) : [r];
+    });
+  try {
+    makeOrgDb(scienceDir, 'orgA', ['p1']);
+    await runScienceExport({ scienceDir, outDir });
+    const refs = discoverScienceSessions(scienceCwd('orgA', 'p1'), outDir);
+    assert.ok(refs.length >= 1, 'the export fixture must yield sessions');
+    for (const r of refs) {
+      const onDisk = listFiles(dirname(r.path)).sort();
+      const covered = [
+        'session.jsonl',
+        ...r.sidecarFiles.map((f) => f.relPath),
+      ].sort();
+      assert.deepEqual(
+        onDisk,
+        covered,
+        'every exporter-written file must be the transcript or an allowlisted sidecar',
+      );
+    }
+  } finally {
+    rmSync(scienceDir, { recursive: true, force: true });
+    rmSync(outDir, { recursive: true, force: true });
   }
 });
 
