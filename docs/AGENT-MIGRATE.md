@@ -22,6 +22,10 @@ and env. Each row is one project: NAME, PROJECT ID, SESSIONS, with its
 `cwd:` path(s) indented below. In all mode, a PROJECT ID of `(not created)`
 means that directory has never been synced — no remote project exists yet.
 
+A claude-science project's `cwd:` is not a directory but a synthetic URI of
+the form `claude-science://<org_id>/<proj_id>`. Treat it exactly like any
+other cwd in the steps below — just copy the whole URI verbatim.
+
 ### 2. Confirm the plan with the user
 
 Identify the SOURCE (whose data moves away) and the TARGET (where it lands),
@@ -55,6 +59,11 @@ migrates its data; a `(not created)` directory has nothing to move, so it
 **joins** the target project and binds the directory to it instead (the first
 sync then uploads there directly).
 
+`--cwd` also accepts a claude-science URI. It is used verbatim (no path
+resolution, no worktree folding, no is-a-directory check), but it must parse
+as a complete `claude-science://<org_id>/<proj_id>` — copy the entire `cwd:`
+line from step 1; a truncated or single-slash form is rejected up front.
+
 ### 4. Verify and finish
 
 - Read the command output: `migrated …` lines report manifest records moved,
@@ -74,6 +83,9 @@ sync then uploads there directly).
   lock; wait a minute and retry.
 - `<path> is not a directory (and has no project mapping)` → the `--cwd`
   argument is wrong or you meant a project id; re-check against step 1.
+- `invalid claude-science cwd "…" — expected claude-science://<org_id>/<proj_id>`
+  → the science URI was truncated or malformed (e.g. `claude-science:/…` with
+  a single slash, or a trailing `/`); re-copy the full `cwd:` line from step 1.
 - Backend errors are printed verbatim. If the command failed AFTER the server
   move (rare local-disk failure), tell the user: the server data has already
   moved; re-running the same command is the recovery path, and the backend's

@@ -1,8 +1,8 @@
 # tanka-work-memory-cli
 
 `tanka-wm` — a bun CLI (with an Ink TUI) that **discovers coding-agent session
-transcripts** (Claude Code, Codex, Claude Cowork) per project and **syncs them
-to the Tanka work-memory backend**.
+transcripts** (Claude Code, Codex, Claude Cowork, claude-science) per project
+and **syncs them to the Tanka work-memory backend**.
 
 Single package, zero runtime dependency beyond bun and `ink`/`react` for the
 terminal UI. The session-discovery core is agent-agnostic; the upload layer
@@ -45,7 +45,9 @@ To change install dir: `TANKA_WM_INSTALL_DIR=/usr/local/bin curl ... | bash`
   sessions.
 - Discover sessions: Claude Code (`~/.claude/projects/`), Codex
   (`~/.codex/sessions/`), Cowork (`~/Library/Application Support/Claude/
-  local-agent-mode-sessions/`).
+  local-agent-mode-sessions/`), claude-science (`~/.claude-science`, exported
+  to a local cache before each sync; macOS/Linux only — each science project
+  shows up as `claude-science://<org>/<proj>`).
 - Incremental sync — upload files to S3, then POST `/sync` to register with
   the backend. A local manifest records each session's transcript mtime+size;
   only new/changed sessions sync. Stale records are pruned automatically.

@@ -5,7 +5,13 @@ work-memory session sync tool — for them. This is the complete, deterministic,
 non-interactive procedure.
 
 `tanka-wm` discovers raw coding-agent session transcripts (Claude Code, Codex,
-Cowork) on this machine and syncs them to the Tanka work-memory backend.
+Cowork, claude-science) on this machine and syncs them to the Tanka
+work-memory backend. claude-science sessions are read from the local
+claude-science data dir (default `~/.claude-science`), exported to a local
+cache before each sync, and discovered automatically — each science project
+appears as a synthetic `claude-science://<org_id>/<proj_id>` entry instead of
+a directory path. **macOS/Linux only**: on Windows the science export is a
+hard no-op, so science sessions are simply absent there.
 "Fully configured" means: a CLI on `PATH`, config + credentials written,
 and a scheduled job running the upload.
 
@@ -127,6 +133,16 @@ cat > ~/.tanka-wm/config.json <<EOF
 EOF
 ```
 
+If the user's claude-science data lives somewhere other than
+`~/.claude-science`, add a `"scienceDir"` key to the config JSON above (keep
+the `~` literal — the CLI expands it itself):
+
+```json
+  "scienceDir": "~/custom/claude-science-dir"
+```
+
+Omit the key entirely for the default location; an empty value is not valid.
+
 ### If the user chooses "select" mode
 
 **Stop the agent-driven setup here.** Select mode requires interactive project
@@ -231,11 +247,13 @@ Disable with `TANKA_WM_NO_AUTO_UPDATE=1`.
 
 | File | Description |
 |------|-------------|
-| `~/.tanka-wm/config.json` | mode, cwds, projects (each carries `env`), deviceId, deviceName, wizardStep |
+| `~/.tanka-wm/config.json` | mode, cwds, projects (each carries `env`), deviceId, deviceName, wizardStep, optional scienceDir |
 | `~/.tanka-wm/credentials.json` | token + env (0600) |
 | `~/.tanka-wm/uploads/<env>/<ns>.json` | upload manifest shards, namespaced by env then project |
 | `~/.tanka-wm/project-map/<env>.json` | all-mode cwd→remoteProjectId mapping, one per env |
 | `~/.tanka-wm/schedule.json` | installed cron expr echo |
+| `~/.tanka-wm/claude_science_export/` | claude-science export cache (derived from the local science DB; safe to delete, rebuilt on next sync) |
+| `~/.tanka-wm/science-export.lock` | advisory lock held while the science export writes |
 | `~/.tanka-wm/update-state.json` | auto-update throttle state |
 
 ## Notes
