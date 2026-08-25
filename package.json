@@ -1,6 +1,6 @@
 {
   "name": "tanka-work-memory-cli",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "private": true,
   "description": "tanka-wm — discover Claude Code / Codex coding-agent sessions per project and sync them to Tanka cloud storage. Distributed as a self-contained bun binary; bun is also the dev runtime.",
   "type": "module",
