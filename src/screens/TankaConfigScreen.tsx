@@ -1,7 +1,13 @@
 /** Tanka upload-target form: pick the environment (dev/test/uat/prod), enter
  *  the token, edit the device name, and view the device ID. Both token + env
  *  persist to credentials.json; deviceName persists to config.json. Saving
- *  always verifies the token against the chosen environment first. */
+ *  always verifies the token against the chosen environment first.
+ *
+ *  It also DISPLAYS (read-only) the Claude Code session directories discovery
+ *  resolved. Those are derived, not configured — but discovery sweeps all of
+ *  them at once, so anyone deliberately keeping separate CLAUDE_CONFIG_DIRs
+ *  (work vs personal, say) has to be able to see that both are in scope before
+ *  a sync uploads both. Silent breadth is the thing to avoid here. */
 import { Box, Text } from 'ink';
 import type React from 'react';
 import { useState } from 'react';
@@ -15,6 +21,10 @@ import {
   DEFAULT_TANKA_ENV,
   type TankaEnv,
 } from '../config/config';
+import {
+  type ClaudeRootCandidate,
+  claudeRootCandidates,
+} from '../discovery/sessions';
 import { useConfig } from '../hooks/useConfig';
 import { useScreenInput } from '../hooks/useScreenInput';
 import { theme } from '../theme';
@@ -33,6 +43,13 @@ const ACTION_ROW = 5;
 const ROW_COUNT = 6;
 
 type TestState = { status: 'idle' | 'testing' | 'error'; message?: string };
+
+/** Where a resolved Claude Code root came from, in the user's terms. */
+function rootSourceLabel(source: ClaudeRootCandidate['source']): string {
+  if (source === 'env') return 'from CLAUDE_CONFIG_DIR';
+  if (source === 'config') return 'recorded for scheduled runs';
+  return 'default';
+}
 
 export function TankaConfigScreen({
   onSaved,
@@ -65,6 +82,11 @@ export function TankaConfigScreen({
   const [deviceName, setDeviceName] = useState<string>(config.deviceName ?? '');
   const [scienceDir, setScienceDir] = useState<string>(
     config.scienceDir ?? DEFAULT_SCIENCE_DIR,
+  );
+  // Resolved once on mount: the roots only change when the environment or the
+  // config does, neither of which can happen while this screen is up.
+  const [claudeRoots] = useState<ClaudeRootCandidate[]>(() =>
+    claudeRootCandidates(),
   );
   const [focus, setFocus] = useState(0);
   const [reveal, setReveal] = useState(false);
@@ -295,6 +317,37 @@ export function TankaConfigScreen({
             focused={focus === SCIENCE_DIR_ROW}
             placeholder={DEFAULT_SCIENCE_DIR}
           />
+        </Box>
+
+        {/* Claude Code session dirs — resolved, not editable. Every one listed as
+            present is swept on sync, so this is where a second CLAUDE_CONFIG_DIR
+            becomes visible instead of quietly widening what gets uploaded. */}
+        <Box marginTop={1} flexDirection="column">
+          <Box>
+            <Text color={theme.dim}>{'  '}</Text>
+            <Text color={theme.dim}>{'claude code'.padEnd(16)}</Text>
+            <Text color={theme.dim}>
+              {claudeRoots.some((c) => c.exists)
+                ? `${claudeRoots.filter((c) => c.exists).length} dir(s) scanned`
+                : 'no session dir found'}
+            </Text>
+          </Box>
+          {claudeRoots.map((c) => (
+            // Path and origin on separate lines: a long path wraps on its own
+            // instead of tearing the origin label in half mid-word.
+            <Box key={c.dir} marginLeft={18} flexDirection="column">
+              <Text color={c.exists ? theme.dim : theme.warn}>
+                {c.exists ? '· ' : '✗ '}
+                {c.dir}
+              </Text>
+              <Box marginLeft={2}>
+                <Text color={theme.dim}>{rootSourceLabel(c.source)}</Text>
+                {c.exists ? null : (
+                  <Text color={theme.warn}>{' — not found'}</Text>
+                )}
+              </Box>
+            </Box>
+          ))}
         </Box>
 
         {/* test & save */}

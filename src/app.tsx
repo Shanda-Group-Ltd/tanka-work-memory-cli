@@ -14,6 +14,7 @@ import {
   type Config,
   type Credentials,
   DEFAULT_TANKA_ENV,
+  ensureClaudeConfigDir,
   ensureDeviceIdentity,
   loadConfig,
   loadCredentials,
@@ -72,7 +73,7 @@ function initialWizardStep(
 export function App({ checkMode }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const [config, setConfigState] = useState<Config>(() =>
-    ensureDeviceIdentity(loadConfig()),
+    ensureClaudeConfigDir(ensureDeviceIdentity(loadConfig())),
   );
   const [credentials, setCredentialsState] = useState<Credentials | null>(() =>
     loadCredentials(),

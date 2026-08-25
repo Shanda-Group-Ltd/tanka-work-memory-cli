@@ -11,6 +11,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import type { ProjectCwd } from '../config/config';
+import {
+  DEFAULT_CLAUDE_CONFIG_DIR,
+  expandHome,
+  loadConfig,
+} from '../config/config';
 import { scienceExportDir } from '../config/paths';
 
 /**
@@ -165,6 +170,77 @@ function isDir(p: string): boolean {
  */
 export function claudeEncodedDir(absCwd: string): string {
   return absCwd.replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+/** Which source named a Claude Code root, in order of authority. */
+export type ClaudeRootSource = 'env' | 'config' | 'default';
+
+export interface ClaudeRootCandidate {
+  /** the `<configDir>/projects` path itself, absolute and `~`-expanded */
+  dir: string;
+  /** which of the three sources contributed it (the most authoritative one) */
+  source: ClaudeRootSource;
+  /** false for a candidate that does not exist on disk — a stale snapshot,
+   *  typically, or a machine where Claude Code has never run */
+  exists: boolean;
+}
+
+/**
+ * Every directory that may hold Claude Code's per-cwd session dirs, most
+ * authoritative first, deduped.
+ *
+ * Claude Code honours the CLAUDE_CONFIG_DIR environment variable, so its
+ * sessions do not necessarily live under `~/.claude`. Resolving that to a
+ * SINGLE root is not possible here: the interactive path can read the variable,
+ * but the scheduled/cron path inherits no shell environment and never sees it.
+ * Picking one root would therefore mean picking the wrong one on exactly the
+ * path nobody watches — a cron sync that silently uploads a stale directory.
+ *
+ * So this returns a SET and every caller sweeps all of it. The three sources:
+ *   1. CLAUDE_CONFIG_DIR — live truth, present only when a shell exported it.
+ *   2. `config.claudeConfigDir` — the snapshot the last environment-aware run
+ *      recorded (see `ensureClaudeConfigDir`); the cron path's only clue.
+ *   3. `~/.claude` — Claude Code's default, always worth a look.
+ *
+ * Treating them as a set is what makes a stale snapshot survivable: a snapshot
+ * that no longer matches reality adds one dead directory to the sweep instead
+ * of hiding the live one. Sessions dedupe by `(agent, id)`, so a directory
+ * reachable through two sources is still counted once.
+ *
+ * Non-existent candidates are KEPT here (unlike {@link claudeProjectsRoots},
+ * which drops them): the config screen lists them so a stale snapshot is
+ * visible rather than merely inert, and sync warns about them.
+ */
+export function claudeRootCandidates(): ClaudeRootCandidate[] {
+  const out: ClaudeRootCandidate[] = [];
+  const push = (base: string | undefined, source: ClaudeRootSource): void => {
+    const b = base?.trim();
+    if (!b) return;
+    // resolve, not join: a relative CLAUDE_CONFIG_DIR would otherwise be read
+    // against the process cwd, which under cron is anybody's guess.
+    const dir = path.resolve(expandHome(b), 'projects');
+    // First source to contribute a path wins its label — the list is ordered by
+    // authority, so a dir named by both env and snapshot reads as 'env'.
+    if (out.some((c) => foldPath(c.dir) === foldPath(dir))) return;
+    out.push({ dir, source, exists: isDir(dir) });
+  };
+  push(process.env.CLAUDE_CONFIG_DIR, 'env');
+  // Read from disk rather than taking it as an argument: this is an
+  // implementation detail of "where do the files live", not a decision every
+  // call site should have to thread through.
+  try {
+    push(loadConfig().claudeConfigDir, 'config');
+  } catch {
+    /* unreadable config must not sink discovery — the default root still works */
+  }
+  push(DEFAULT_CLAUDE_CONFIG_DIR, 'default');
+  return out;
+}
+
+function claudeProjectsRoots(): string[] {
+  return claudeRootCandidates()
+    .filter((c) => c.exists)
+    .map((c) => c.dir);
 }
 
 /**
@@ -742,8 +818,9 @@ export function discoverSessionsForProject(
   const fastDirNames = new Set(roots.map((r) => foldPath(claudeEncodedDir(r))));
 
   // ── Claude Code ──────────────────────────────────────────
-  const ccRoot = path.join(os.homedir(), '.claude', 'projects');
-  if (isDir(ccRoot)) {
+  // One sweep per resolved root (see claudeProjectsRoots): CLAUDE_CONFIG_DIR may
+  // point Claude Code away from ~/.claude, and the cron path can't read it.
+  for (const ccRoot of claudeProjectsRoots()) {
     let dirNames: string[] = [];
     try {
       dirNames = readdirSync(ccRoot).filter((d) => isDir(path.join(ccRoot, d)));
@@ -938,9 +1015,15 @@ export interface ScannedCwd {
 export function scanSessionCwds(): ScannedCwd[] {
   const out: ScannedCwd[] = [];
 
-  // Claude Code — one dir per cwd
-  const ccRoot = path.join(os.homedir(), '.claude', 'projects');
-  if (isDir(ccRoot)) {
+  // Claude Code — one dir per cwd, swept across every resolved root (see
+  // claudeProjectsRoots). Two roots can hold dirs for the SAME cwd — sessions
+  // written before and after CLAUDE_CONFIG_DIR was re-pointed — so tally into a
+  // map instead of pushing one row per root, which would show the cwd twice.
+  // Tally session *ids* (the .jsonl basename), not file counts: a directory
+  // reachable through two roots — a copied ~/.claude, most obviously — would
+  // otherwise count every session in it twice.
+  const ccCounts = new Map<string, { cwd: string; ids: Set<string> }>();
+  for (const ccRoot of claudeProjectsRoots()) {
     let dirNames: string[] = [];
     try {
       dirNames = readdirSync(ccRoot).filter((d) => isDir(path.join(ccRoot, d)));
@@ -958,14 +1041,19 @@ export function scanSessionCwds(): ScannedCwd[] {
       if (files.length === 0) continue;
       const probed = probeClaude(readHead(path.join(dirPath, files[0]!)));
       if (probed.cwd) {
-        out.push({
-          cwd: path.resolve(probed.cwd),
-          agent: 'claude-code',
-          sessionCount: files.length,
-        });
+        const cwd = path.resolve(probed.cwd);
+        const key = foldPath(cwd);
+        let entry = ccCounts.get(key);
+        if (!entry) {
+          entry = { cwd, ids: new Set<string>() };
+          ccCounts.set(key, entry);
+        }
+        for (const f of files) entry.ids.add(f.replace(/\.jsonl$/, ''));
       }
     }
   }
+  for (const { cwd, ids } of ccCounts.values())
+    out.push({ cwd, agent: 'claude-code', sessionCount: ids.size });
 
   // Codex — sessions scattered by date; tally by probed cwd
   const cxRoot = path.join(os.homedir(), '.codex', 'sessions');
