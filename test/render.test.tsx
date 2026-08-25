@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, test } from 'bun:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -91,6 +91,33 @@ test('TankaConfigScreen mounts and renders the form fields', async () => {
   assert.match(frame, /claude science/);
   assert.match(frame, /~\/\.claude-science/);
   unmount();
+});
+
+// Discovery sweeps EVERY resolved Claude Code root at once. Someone who keeps
+// work and personal sessions in separate CLAUDE_CONFIG_DIRs must be able to see
+// that both are in scope before a sync ships both — so the screen lists them,
+// stale ones included, rather than widening the sweep silently.
+test('TankaConfigScreen lists the resolved Claude Code session dirs', async () => {
+  const alt = join(home, 'alt-claude');
+  mkdirSync(join(alt, 'projects'), { recursive: true });
+  process.env.CLAUDE_CONFIG_DIR = alt;
+  try {
+    const { lastFrame, unmount } = render(
+      harness(<TankaConfigScreen onSaved={noop} onCancel={noop} />),
+    );
+    await delay(40);
+    const frame = lastFrame() ?? '';
+    assert.match(frame, /claude code/);
+    // Both roots are in scope and both are named — the env one and the default.
+    // (Paths themselves aren't asserted: a tmpdir path is long enough that Ink
+    // wraps it mid-word, which says nothing about the screen being wrong.)
+    assert.match(frame, /2 dir\(s\) scanned/);
+    assert.match(frame, /from CLAUDE_CONFIG_DIR/);
+    assert.match(frame, /default/);
+    unmount();
+  } finally {
+    delete process.env.CLAUDE_CONFIG_DIR;
+  }
 });
 
 test('CronModal shows a Continue row in wizard mode', async () => {

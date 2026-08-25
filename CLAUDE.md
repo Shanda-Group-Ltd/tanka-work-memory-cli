@@ -53,7 +53,11 @@ bun run build      # scripts/build-binaries.mjs → dist/tanka-wm-<platform>
 - **Config** — `config.json` holds `cwds: ProjectCwd[]`,
   `projects?: Project[]`, `deviceId`, `deviceName`, `mode`, `wizardStep`,
   `scienceDir?` (claude-science data dir override, stored as a `~`-literal;
-  expand with `expandHome` before touching the filesystem).
+  expand with `expandHome` before touching the filesystem),
+  `claudeConfigDir?` (CLAUDE_CONFIG_DIR snapshot — see below).
+  `loadConfig` rebuilds the object from a **field whitelist**, so a new key is
+  silently dropped on read until it is added there (`scienceDir` was lost this
+  way — written by the wizard, never read back).
 - **Science cwd** — a claude-science project is encoded as the synthetic cwd
   `claude-science://<org_id>/<proj_id>` (one project ≡ one cwd, both modes).
   It is an identifier, NOT a path: `path.resolve` would mangle it (collapsing
@@ -71,6 +75,15 @@ bun run build      # scripts/build-binaries.mjs → dist/tanka-wm-<platform>
   output shape must be added there too (a lockstep test in science.test.ts
   fails otherwise). `walkSidecar` additionally skips OS junk (.DS_Store etc.
   and `._*` AppleDouble) for every agent's sidecar tree.
+  Claude Code's store is resolved by `claudeProjectsRoots()` as a **set**, not a
+  single path: `CLAUDE_CONFIG_DIR` env var (live truth, absent under cron) ·
+  `config.claudeConfigDir` snapshot · `~/.claude`, deduped and existence-filtered.
+  A set is what makes a stale snapshot survivable — it costs one dead directory
+  in the sweep instead of hiding the live one. Do NOT "simplify" this back to
+  one root (that is GitHub issue #1: cron inherits no shell env, so a single
+  root is wrong on exactly the path nobody watches). `scanSessionCwds` tallies
+  Claude Code counts through a map for the same reason — one cwd can live under
+  two roots and must not produce two picker rows.
 - `src/discovery/science-export.ts` — TS port of the claude-science exporter:
   reads per-org SQLite DBs (`<scienceDir>/orgs/<org>/operon-cli.db`, bun:sqlite,
   WAL read transaction) and writes `~/.tanka-wm/claude_science_export/<org>/
@@ -99,6 +112,13 @@ bun run build      # scripts/build-binaries.mjs → dist/tanka-wm-<platform>
   remote project is deleted server-side; select mode pre-validates *created*
   projects against `listProjects` (paginated). Drives both `tanka-wm sync`
   (headless cron) and Board's sync actions.
+  Two fail-loud guards write to `wm.log` (exported for tests — `runSync` itself
+  needs credentials + network): `logClaudeRoots` states every Claude Code dir
+  the run will sweep and warns per non-existent env/snapshot root (a missing
+  *default* root alone is not warned — plenty of machines never run Claude
+  Code); `warnOnEmptySweep` fires when a run that HAD scope found 0 sessions.
+  Both exist because a stale root otherwise reports "done — 0 uploaded" as
+  success, which is issue #1's silence in a new costume.
 - `src/migrate.ts` — `runMigrate`: client side of `POST /project/change` (move
   one project's data into another). Order is server-call-first; only on success
   is local state re-pointed at the target — manifest shard (sync progress),
@@ -167,7 +187,7 @@ Two stages per session:
   no separate `-gw` gateway and no request signing.
 - State lives under `~/.tanka-wm/` (override `TANKA_WM_HOME`, used by tests):
   - `config.json` — cwds, projects (each carries `env`), mode, wizardStep,
-    deviceId, deviceName, scienceDir?
+    deviceId, deviceName, scienceDir?, claudeConfigDir?
   - `credentials.json` 0600 — token + env
   - `uploads/<env>/<ns>.json` — manifest shards per env per project namespace
     (`ns` = remoteProjectId); env-isolated so switching env can't cross-contaminate
@@ -187,7 +207,11 @@ Two stages per session:
 - 3 steps (all): mode → tanka → cron
 - Tanka step: env + token + deviceName (editable) + deviceId (read-only) +
   claude-science data dir (editable, default `~/.claude-science`; clearing the
-  field resets to the default)
+  field resets to the default) + the resolved Claude Code session dirs
+  (read-only list from `claudeRootCandidates`, non-existent ones shown too).
+  That list is not decoration: discovery sweeps every resolved root at once, so
+  someone deliberately keeping separate CLAUDE_CONFIG_DIRs (work vs personal)
+  must be able to SEE that both are in scope before a sync ships both.
 - Projects step (select only): `ProjectsScreen` —
   create/join/edit/migrate/delete/leave
 

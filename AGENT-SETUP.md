@@ -143,6 +143,22 @@ the `~` literal — the CLI expands it itself):
 
 Omit the key entirely for the default location; an empty value is not valid.
 
+If Claude Code runs with a non-default `CLAUDE_CONFIG_DIR`, add a
+`"claudeConfigDir"` key pointing at that directory (sessions live under
+`<dir>/projects/`):
+
+```json
+  "claudeConfigDir": "/path/to/claude-config-dir"
+```
+
+The CLI records this key automatically on any run that can read the
+`CLAUDE_CONFIG_DIR` environment variable, so setting it by hand is only needed
+when the very first run is a scheduled one. A scheduled (cron / launchd / task
+scheduler) run inherits no shell environment and therefore cannot read the
+variable — this key is how it finds the sessions. `~/.claude` is always scanned
+in addition, so a wrong or outdated value costs an extra directory scan rather
+than losing sessions.
+
 ### If the user chooses "select" mode
 
 **Stop the agent-driven setup here.** Select mode requires interactive project
@@ -247,7 +263,7 @@ Disable with `TANKA_WM_NO_AUTO_UPDATE=1`.
 
 | File | Description |
 |------|-------------|
-| `~/.tanka-wm/config.json` | mode, cwds, projects (each carries `env`), deviceId, deviceName, wizardStep, optional scienceDir |
+| `~/.tanka-wm/config.json` | mode, cwds, projects (each carries `env`), deviceId, deviceName, wizardStep, optional scienceDir, optional claudeConfigDir |
 | `~/.tanka-wm/credentials.json` | token + env (0600) |
 | `~/.tanka-wm/uploads/<env>/<ns>.json` | upload manifest shards, namespaced by env then project |
 | `~/.tanka-wm/project-map/<env>.json` | all-mode cwd→remoteProjectId mapping, one per env |

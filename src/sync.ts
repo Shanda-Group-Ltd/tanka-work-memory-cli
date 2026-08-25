@@ -21,7 +21,9 @@ import { createApiClient, listProjects, syncProject } from './api';
 import type { SyncSessionItem } from './api/types';
 import { createProject as apiCreateProject } from './api/work-memory';
 import {
+  type Config,
   DEFAULT_SCIENCE_DIR,
+  ensureClaudeConfigDir,
   ensureDeviceIdentity,
   ensureProjectsEnv,
   expandHome,
@@ -49,6 +51,8 @@ import {
 } from './config/uploads';
 import { runScienceExport } from './discovery/science-export';
 import {
+  type ClaudeRootSource,
+  claudeRootCandidates,
   discoverAllSessions,
   discoverSessionsForProject,
   type SessionRef,
@@ -431,8 +435,81 @@ export async function runSync(opts: SyncOptions = {}): Promise<SyncResult> {
   }
 }
 
+/**
+ * Log the Claude Code roots that were resolved, and complain about the ones
+ * that don't exist.
+ *
+ * The point is the cron path. A snapshot of CLAUDE_CONFIG_DIR goes stale the
+ * moment the user re-points the variable without running tanka-wm interactively
+ * again (see `ensureClaudeConfigDir`), and a scheduled run has no way to notice
+ * on its own — it just sweeps a dead directory, uploads nothing, and reports
+ * success. That silence is the original bug (GitHub issue #1) wearing a
+ * different hat, so every run states which directories it actually looked at.
+ *
+ * A missing DEFAULT root is not worth a warning on its own — plenty of machines
+ * run Codex or Cowork and never Claude Code — so it only counts toward the
+ * "nothing at all exists" case.
+ *
+ * Exported for tests only: `runSync` itself needs credentials and a network, so
+ * this is the seam where the warning behaviour can actually be pinned.
+ */
+export function logClaudeRoots(): void {
+  const candidates = claudeRootCandidates();
+  const label = (source: ClaudeRootSource): string =>
+    source === 'env'
+      ? 'CLAUDE_CONFIG_DIR'
+      : source === 'config'
+        ? 'config.claudeConfigDir'
+        : 'default';
+
+  for (const c of candidates) {
+    if (c.exists || c.source === 'default') continue;
+    log(
+      'warn',
+      'sync',
+      `Claude Code dir from ${label(c.source)} does not exist: ${c.dir} — sessions there will be missed`,
+    );
+  }
+
+  const live = candidates.filter((c) => c.exists);
+  if (live.length === 0) {
+    log(
+      'warn',
+      'sync',
+      'no Claude Code session directory found — if Claude Code runs with a custom CLAUDE_CONFIG_DIR, run tanka-wm once from that shell so the path is recorded for scheduled runs',
+    );
+    return;
+  }
+  log(
+    'info',
+    'sync',
+    `Claude Code dirs: ${live.map((c) => `${c.dir} (${label(c.source)})`).join(', ')}`,
+  );
+}
+
+/**
+ * Complain when a run that had somewhere to look found nothing at all. On its
+ * own each cause is benign (a brand-new install, a project whose cwds have no
+ * sessions yet), but combined with a stale root it is the exact shape of the
+ * silent failure this whole mechanism exists to prevent — so say it out loud
+ * rather than logging "done — 0 uploaded" and calling it a success.
+ */
+export function warnOnEmptySweep(config: Config, result: SyncResult): void {
+  if (result.uploaded + result.failed + result.skipped > 0) return;
+  const hasScope =
+    config.mode === 'all' ||
+    (config.cwds?.length ?? 0) > 0 ||
+    (config.projects?.length ?? 0) > 0;
+  if (!hasScope) return;
+  log(
+    'warn',
+    'sync',
+    'found 0 sessions across every configured directory — check the Claude Code dirs logged above and the registered working directories',
+  );
+}
+
 async function runSyncLocked(opts: SyncOptions): Promise<SyncResult> {
-  let config = ensureDeviceIdentity(loadConfig());
+  let config = ensureClaudeConfigDir(ensureDeviceIdentity(loadConfig()));
   const credentials = loadCredentials();
   if (!credentials) {
     log('error', 'sync', 'aborted — Tanka token is not configured');
@@ -443,6 +520,10 @@ async function runSyncLocked(opts: SyncOptions): Promise<SyncResult> {
   const deviceId = config.deviceId ?? '';
   const deviceName = config.deviceName ?? '';
   const apiClient = createApiClient(credentials);
+
+  // State the Claude Code dirs up front, before anything can fail — a run that
+  // dies later still leaves a record of where it was going to look.
+  logClaudeRoots();
 
   // Refresh the claude-science export before discovery so its session tree is
   // current. Cheap + incremental (unchanged sessions skip via signature). Held
@@ -750,5 +831,6 @@ async function runSyncLocked(opts: SyncOptions): Promise<SyncResult> {
     'sync',
     `done — ${result.uploaded} uploaded, ${result.failed} failed, ${result.skipped} up-to-date, ${result.cleaned} cleaned`,
   );
+  warnOnEmptySweep(config, result);
   return result;
 }

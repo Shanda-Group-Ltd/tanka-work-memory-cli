@@ -36,6 +36,13 @@ import { configPath, credentialsPath, tuiHome } from './paths';
 export const DEFAULT_SCIENCE_DIR = '~/.claude-science';
 
 /**
+ * Claude Code's default config directory — the fallback root when neither the
+ * CLAUDE_CONFIG_DIR environment variable nor a recorded snapshot points
+ * elsewhere. Sessions live under `<dir>/projects/`.
+ */
+export const DEFAULT_CLAUDE_CONFIG_DIR = '~/.claude';
+
+/**
  * Expand a leading `~` / `~/…` to the user's home directory. We persist the
  * literal `~/.claude-science` (portable across machines and accounts) and
  * expand only at the point of use — so every reader must funnel through here
@@ -138,6 +145,20 @@ export interface Config {
    * before touching the filesystem. Absent means "use the default".
    */
   scienceDir?: string;
+  /**
+   * Snapshot of the CLAUDE_CONFIG_DIR environment variable, recorded on every
+   * run that can see it (see `ensureClaudeConfigDir`). It exists solely for the
+   * scheduled/cron path, which inherits no shell environment and therefore has
+   * no other way to learn where Claude Code actually keeps its sessions.
+   *
+   * A snapshot goes stale the moment the user re-points CLAUDE_CONFIG_DIR and
+   * doesn't run tanka-wm interactively again. That is tolerable only because
+   * discovery treats the resolved directories as a SET (see
+   * `claudeRootCandidates` in discovery/sessions.ts) rather than as the one true
+   * root: a stale entry costs one extra empty directory to scan, it never
+   * shadows the live one. Absent means "no non-default dir has been seen".
+   */
+  claudeConfigDir?: string;
 }
 
 export const PROJECT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
@@ -230,6 +251,12 @@ export function loadConfig(): Config {
       ...(typeof raw.deviceName === 'string'
         ? { deviceName: raw.deviceName }
         : {}),
+      ...(typeof raw.scienceDir === 'string'
+        ? { scienceDir: raw.scienceDir }
+        : {}),
+      ...(typeof raw.claudeConfigDir === 'string'
+        ? { claudeConfigDir: raw.claudeConfigDir }
+        : {}),
     };
   } catch {
     return emptyConfig();
@@ -253,6 +280,41 @@ export function ensureDeviceIdentity(config: Config): Config {
     changed = true;
   }
   if (changed) saveConfig(next);
+  return next;
+}
+
+/**
+ * Record the current CLAUDE_CONFIG_DIR into the config, so the scheduled/cron
+ * path — which inherits no shell environment — can still find Claude Code's
+ * sessions. Called at startup next to {@link ensureDeviceIdentity}, from both
+ * the TUI and the headless `sync`.
+ *
+ * Rules, in order:
+ *   - variable unset (every cron run, and any shell that doesn't export it):
+ *     leave the existing snapshot ALONE. Absence of the variable is not
+ *     evidence that the directory changed, and clearing the snapshot here would
+ *     erase the only clue the cron path has.
+ *   - variable set to the default `~/.claude`: drop the snapshot — the default
+ *     root is always scanned anyway, so recording it is pure noise.
+ *   - variable set to anything else: store it verbatim (the value the user
+ *     exported, `~` and all; readers expand it).
+ *
+ * Writes to disk only when the stored value actually changes.
+ */
+export function ensureClaudeConfigDir(config: Config): Config {
+  const raw = process.env.CLAUDE_CONFIG_DIR?.trim();
+  if (!raw) return config;
+
+  const isDefault =
+    expandHome(raw).replace(/[/\\]+$/, '') ===
+    expandHome(DEFAULT_CLAUDE_CONFIG_DIR);
+  const want = isDefault ? undefined : raw;
+  if (want === config.claudeConfigDir) return config;
+
+  const next = { ...config };
+  if (want === undefined) delete next.claudeConfigDir;
+  else next.claudeConfigDir = want;
+  saveConfig(next);
   return next;
 }
 
